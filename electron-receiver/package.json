@@ -1,0 +1,29 @@
+{
+  "name": "remotex-receiver",
+  "version": "1.0.0",
+  "description": "RemoteX Native Receiver — full OS control via robotjs",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "build:win": "electron-builder --win",
+    "build:mac": "electron-builder --mac",
+    "build:linux": "electron-builder --linux"
+  },
+  "dependencies": {
+    "socket.io-client": "^4.8.3",
+    "@nut-tree-fork/nut-js": "^4.2.3",
+    "electron-log": "^5.2.0"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.remotex.receiver",
+    "productName": "RemoteX Receiver",
+    "files": ["src/**/*"],
+    "win": { "target": "nsis", "icon": "assets/icon.ico" },
+    "mac": { "target": "dmg", "icon": "assets/icon.icns" },
+    "linux": { "target": "AppImage" }
+  }
+}

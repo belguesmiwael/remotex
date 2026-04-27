@@ -2,213 +2,163 @@
 
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { EVENTS, GESTURE } from '@/lib/constants'
-import { GestureMapper, detectPinch, detectFist, detectTwoFingerSwipe } from './GestureMapper'
+import { GestureMapper, detectPinch, detectFist } from './GestureMapper'
 
-/**
- * GestureEngine — MediaPipe Hands integration
- * Runs hand detection on webcam frames and emits cursor/gesture events
- */
-export default function GestureEngine({
-  socket,
-  sessionId,
-  active,
-  overlayRef,
-  onCommand,
-  onCursorMove,
-}) {
+export default function GestureEngine({ socket, sessionId, active, overlayRef, onCommand, onCursorMove }) {
   const videoRef = useRef(null)
-  const handsRef = useRef(null)
-  const cameraRef = useRef(null)
+  const detectorRef = useRef(null)
+  const rafRef = useRef(null)
   const mapperRef = useRef(new GestureMapper())
-  const pinchStartRef = useRef(null)  // timestamp when pinch started
-  const prevLandmarksRef = useRef(null)
-  const [status, setStatus] = useState('idle')  // idle | loading | active | error
-  const [isPinch, setIsPinch] = useState(false)
+  const pinchStartRef = useRef(null)
+  const [status, setStatus] = useState('idle')
 
-  const handleResults = useCallback((results) => {
-    const landmarks = results.multiHandLandmarks?.[0]
+  const emit = useCallback((event, payload = {}) => {
+    socket?.emit(event, { sessionId, ...payload })
+  }, [socket, sessionId])
 
-    // Clear overlay if no hand detected
-    if (!landmarks || landmarks.length === 0) {
-      overlayRef?.current?.clear()
-      prevLandmarksRef.current = null
+  const detect = useCallback(async () => {
+    const video = videoRef.current
+    const detector = detectorRef.current
+    if (!video || !detector || video.readyState < 2) {
+      rafRef.current = requestAnimationFrame(detect)
       return
     }
 
-    // Check fist → pause gesture mode
-    if (detectFist(landmarks)) {
-      overlayRef?.current?.clear()
-      onCommand?.({ type: 'gesture', action: 'fist — paused' })
-      return
-    }
+    try {
+      const hands = await detector.estimateHands(video, { flipHorizontal: true })
 
-    // Index finger tip → cursor position
-    const indexTip = landmarks[8]
-    const mapped = mapperRef.current.map(1 - indexTip.x, indexTip.y)  // mirror X
-
-    // Pinch detection
-    const { isPinch: pinchNow } = detectPinch(landmarks)
-    setIsPinch(pinchNow)
-
-    if (pinchNow && !pinchStartRef.current) {
-      pinchStartRef.current = Date.now()
-    }
-
-    if (!pinchNow && pinchStartRef.current) {
-      const heldMs = Date.now() - pinchStartRef.current
-      pinchStartRef.current = null
-
-      if (heldMs < GESTURE.PINCH_HOLD_MS) {
-        // Short pinch → click
-        socket?.emit(EVENTS.CLICK, {
-          sessionId,
-          button: 0,
-          x: mapped.normX,
-          y: mapped.normY,
-          type: 'click',
-        })
-        onCommand?.({ type: 'gesture', action: 'click' })
-      } else {
-        // Long pinch release → drag end
-        socket?.emit(EVENTS.DRAG, {
-          sessionId,
-          from: { x: mapped.normX, y: mapped.normY },
-          to: { x: mapped.normX, y: mapped.normY },
-        })
-        onCommand?.({ type: 'gesture', action: 'drag' })
+      if (!hands || hands.length === 0) {
+        overlayRef?.current?.clear()
+        rafRef.current = requestAnimationFrame(detect)
+        return
       }
-    }
 
-    // Two-finger swipe → scroll
-    const swipe = detectTwoFingerSwipe(landmarks, prevLandmarksRef.current)
-    if (swipe) {
-      const delta = swipe === 'down' ? 200 : -200
-      socket?.emit(EVENTS.SCROLL, {
-        sessionId,
-        deltaX: 0,
-        deltaY: delta,
-      })
-      onCommand?.({ type: 'gesture', action: `scroll ${swipe}` })
-    }
+      const keypoints = hands[0].keypoints
+      // Index tip = keypoint 8, thumb tip = keypoint 4
+      const indexTip = keypoints[8]
+      const thumbTip = keypoints[4]
 
-    prevLandmarksRef.current = landmarks
+      if (!indexTip) { rafRef.current = requestAnimationFrame(detect); return }
 
-    // Emit cursor move if moved enough
-    if (mapped.moved) {
-      socket?.emit(EVENTS.CURSOR_MOVE, {
-        sessionId,
-        x: mapped.normX,
-        y: mapped.normY,
-      })
-      onCursorMove?.({ x: mapped.screenX, y: mapped.screenY })
-    }
+      // Map to screen coordinates
+      const mapped = mapperRef.current.map(indexTip.x / video.videoWidth, indexTip.y / video.videoHeight)
 
-    // Draw overlay
-    overlayRef?.current?.drawHand(landmarks, mapped.screenX, mapped.screenY, pinchNow)
-  }, [socket, sessionId, overlayRef, onCommand, onCursorMove])
+      // Pinch detection
+      const dist = thumbTip
+        ? Math.hypot((indexTip.x - thumbTip.x), (indexTip.y - thumbTip.y))
+        : 999
+      const isPinch = dist < GESTURE.PINCH_THRESHOLD
+
+      if (isPinch && !pinchStartRef.current) {
+        pinchStartRef.current = Date.now()
+      }
+      if (!isPinch && pinchStartRef.current) {
+        const held = Date.now() - pinchStartRef.current
+        pinchStartRef.current = null
+        if (held < GESTURE.PINCH_HOLD_MS) {
+          emit(EVENTS.CLICK, { x: mapped.normX, y: mapped.normY, clickType: 'click', button: 0 })
+          onCommand?.({ type: 'gesture', action: 'pinch click' })
+        }
+      }
+
+      // Cursor move
+      if (mapped.moved) {
+        emit(EVENTS.CURSOR_MOVE, { x: mapped.normX, y: mapped.normY })
+        onCursorMove?.({ x: mapped.screenX, y: mapped.screenY })
+      }
+
+      // Draw overlay
+      overlayRef?.current?.drawHand(
+        keypoints.map(k => ({ x: k.x / video.videoWidth, y: k.y / video.videoHeight })),
+        mapped.screenX, mapped.screenY, isPinch
+      )
+
+    } catch {}
+
+    rafRef.current = requestAnimationFrame(detect)
+  }, [emit, overlayRef, onCommand, onCursorMove])
 
   useEffect(() => {
     if (!active) {
-      // Cleanup
-      cameraRef.current?.stop()
-      handsRef.current?.close()
-      cameraRef.current = null
-      handsRef.current = null
-      setStatus('idle')
+      cancelAnimationFrame(rafRef.current)
+      detectorRef.current?.dispose?.()
+      detectorRef.current = null
+      if (videoRef.current?.srcObject) {
+        videoRef.current.srcObject.getTracks().forEach(t => t.stop())
+        videoRef.current.srcObject = null
+      }
       overlayRef?.current?.clear()
+      setStatus('idle')
       return
     }
 
-    let isMounted = true
+    let mounted = true
+    setStatus('loading')
 
     const init = async () => {
       try {
-        setStatus('loading')
+        // Dynamic import — avoids SSR issues
+        const tf = await import('@tensorflow/tfjs')
+        await import('@tensorflow/tfjs-backend-webgl')
+        await tf.setBackend('webgl')
+        await tf.ready()
 
-        // Dynamic import to avoid SSR
-        const { Hands } = await import('@mediapipe/hands')
-        const { Camera } = await import('@mediapipe/camera_utils')
+        const handPoseDetection = await import('@tensorflow-models/hand-pose-detection')
 
-        if (!isMounted) return
+        const detector = await handPoseDetection.createDetector(
+          handPoseDetection.SupportedModels.MediaPipeHands,
+          {
+            runtime: 'tfjs',
+            modelType: 'lite',
+            maxHands: 1,
+          }
+        )
 
-        const hands = new Hands({
-          locateFile: (file) =>
-            `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`,
+        if (!mounted) { detector.dispose(); return }
+        detectorRef.current = detector
+
+        // Get webcam
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: 320, height: 240, facingMode: 'user', frameRate: 30 },
         })
+        if (!mounted) { stream.getTracks().forEach(t => t.stop()); return }
 
-        hands.setOptions({
-          maxNumHands: 1,
-          modelComplexity: 0,  // Lite model for speed
-          minDetectionConfidence: 0.7,
-          minTrackingConfidence: 0.6,
-        })
-
-        hands.onResults(handleResults)
-
-        // Create hidden video element for webcam
         const video = document.createElement('video')
-        video.style.display = 'none'
+        video.srcObject = stream
         video.setAttribute('playsinline', '')
+        video.style.display = 'none'
         document.body.appendChild(video)
+        await video.play()
         videoRef.current = video
 
-        const camera = new Camera(video, {
-          onFrame: async () => {
-            if (handsRef.current) {
-              await handsRef.current.send({ image: video })
-            }
-          },
-          width: 640,
-          height: 480,
-        })
-
-        handsRef.current = hands
-        cameraRef.current = camera
-
-        await camera.start()
-
-        if (isMounted) {
-          setStatus('active')
-          await hands.initialize()
-        }
+        setStatus('active')
+        rafRef.current = requestAnimationFrame(detect)
       } catch (err) {
-        console.error('[GestureEngine] Init failed:', err)
-        if (isMounted) setStatus('error')
+        console.error('[GestureEngine]', err)
+        if (mounted) setStatus('error')
       }
     }
 
     init()
 
     return () => {
-      isMounted = false
-      cameraRef.current?.stop()
-      handsRef.current?.close()
+      mounted = false
+      cancelAnimationFrame(rafRef.current)
+      detectorRef.current?.dispose?.()
       if (videoRef.current) {
+        videoRef.current.srcObject?.getTracks().forEach(t => t.stop())
         document.body.removeChild(videoRef.current)
         videoRef.current = null
       }
     }
-  }, [active, handleResults, overlayRef])
+  }, [active, detect, overlayRef])
 
   return (
-    <div className="flex flex-col gap-1">
-      {status === 'loading' && (
-        <div className="flex items-center gap-2 text-xs text-text-secondary">
-          <span className="status-dot waiting" />
-          Loading MediaPipe...
-        </div>
-      )}
-      {status === 'active' && (
-        <div className="flex items-center gap-2 text-xs text-text-secondary">
-          <span className="status-dot connected" />
-          {isPinch ? '🤏 Pinching' : '✋ Hand detected'}
-        </div>
-      )}
-      {status === 'error' && (
-        <div className="text-xs text-red-400">
-          ⚠️ Could not start gesture detection. Check camera permissions.
-        </div>
-      )}
+    <div className="flex flex-col gap-1 text-xs">
+      {status === 'idle' && null}
+      {status === 'loading' && <div className="flex items-center gap-2 text-text-secondary"><span className="status-dot waiting" />Loading TensorFlow...</div>}
+      {status === 'active' && <div className="flex items-center gap-2 text-text-secondary"><span className="status-dot connected" />Hand tracking active</div>}
+      {status === 'error' && <div className="text-red-400">⚠️ Camera unavailable or not supported</div>}
     </div>
   )
 }
