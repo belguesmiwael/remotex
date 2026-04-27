@@ -1,7 +1,7 @@
 {
   "name": "remotex",
   "version": "1.0.0",
-  "description": "Real-time remote control app — WebRTC + Voice + Gesture + Eye Tracking",
+  "description": "Real-time remote control app \u2014 WebRTC + Voice + Gesture + Eye Tracking",
   "private": true,
   "scripts": {
     "dev": "next dev",
@@ -11,7 +11,7 @@
     "dev:all": "concurrently \"npm run server\" \"npm run dev\""
   },
   "dependencies": {
-    "next": "15.3.1",
+    "next": "15.5.15",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "socket.io-client": "^4.7.5",
